@@ -1,13 +1,13 @@
 local Game = {
 	blueprints = {},
 	gid = {},
-	_rmv_cache = {},
-	_add_cache = {},
+	_rmv_queue = {},
+	_add_queue = {},
 	_upd_cache = {},
 	_draw_cache = {}
 }
 
--- loops get_gid calls to parents
+-- recursively loops get_gid through parents
 -- parents need _get_gid method
 -- returns a gid in format "parent.child.grandchild"
 local function get_gid(self)
@@ -76,6 +76,10 @@ local function add_child(parent, a, b)
 	child.id = id
 	child.parent = parent
 	setmetatable(child, {__index = blueprint_merged})
+
+
+
+
 	child.gid = get_gid(child)
 
 	-- init child, add grandchildren
@@ -99,6 +103,7 @@ end
 -- a 1d array, ordered by the provided key's value
 -- order is relative to parent
 -- to_push_pop is whether to put in "push" and "pop" for draw calls
+-- todo: check object parameters to eliminate unnecessary pushes/pops
 local function flatten(root, key, to_push_pop)
 	local flat_obj = _cumulative or {}
 	local list = {}
@@ -146,18 +151,18 @@ local function remove_object(self)
 end
 
 -- todo: clean this stuff up
--- adds objects to the _rmv_cache
+-- adds objects to the _rmv_queue
 -- to be removed between frames
 local function to_remove(self)
-	table.insert(Game._rmv_cache, self)
+	table.insert(Game._rmv_queue, self)
 end
 local function to_remove_child(self, id)
 	if child_id == "*" then
 		for _,child in pairs(self.children) do
-			table.insert(Game._rmv_cache, child)
+			table.insert(Game._rmv_queue, child)
 		end
 	else
-		table.insert(Game._rmv_cache, self.children[id])
+		table.insert(Game._rmv_queue, self.children[id])
 	end
 end
 
@@ -195,48 +200,56 @@ setmetatable(Game.blueprints, {
 
 -- todo: fix this fucking mess
 -- todo: add other love callbacks
-function love.draw()
-	Game.rebuild_cache()
-
-	--local offset_x, offset_y = 0,0
-	for _,id in ipairs(Game._draw_cache) do
-		--break
-		if id == "push" then
-			love.graphics.push()
-			--print("pushing")
-		elseif id == "pop" then
-			love.graphics.pop()
-			--print("popping")
-		else
-			local obj = Game.gid[id]
-			--print("translating to",obj.x,obj.y)
-			love.graphics.translate(obj.x, obj.y)
-			love.graphics.rotate(obj.rot)
-			love.graphics.scale(obj.scale)
-			--offset_x, offset_y = obj.x, obj.y
-			if obj.draw then
-				obj:draw()
+do
+	function love.draw()
+		--local offset_x, offset_y = 0,0
+		for _,id in ipairs(Game._draw_cache) do
+			--break
+			if id == "push" then
+				love.graphics.push()
+				--print("pushing")
+			elseif id == "pop" then
+				love.graphics.pop()
+				--print("popping")
+			else
+				local obj = Game.gid[id]
+				--print("translating to",obj.x,obj.y)
+				love.graphics.translate(obj.x, obj.y)
+				love.graphics.rotate(obj.rot)
+				love.graphics.scale(obj.scale)
+				--offset_x, offset_y = obj.x, obj.y
+				if obj.draw then
+					obj:draw()
+				end
 			end
 		end
+		--]]
 	end
-	--]]
-end
 
-function love.update(dt)
-	for _,obj in pairs(Game.gid) do
-		--print(obj.gid)
-		if obj.update then obj:update(dt) end
-	end
-	for _, obj in ipairs(Game._rmv_cache) do
-		local obj_gid = obj.gid
-		remove_object(obj)
-		Game.gid[obj_gid] = nil
+	function love.update(dt)
+		-- call object updates
+		for _,id in pairs(Game._upd_cache) do
+			local obj = Game.gid[id]
+			if obj.update then obj:update(dt) end
+		end
+
+		-- clear objects in remove queue
+		for _, obj in ipairs(Game._rmv_queue) do
+			local obj_gid = obj.gid
+			remove_object(obj)
+			Game.gid[obj_gid] = nil
+		end
+
+		-- insert objects in add queue
+
+		Game.rebuild_cache()
 	end
 end
-
 
 -- idk why but this needs to be a local variable, then metatable set, then added to Game
 -- can't just do Game.root = {id blah blah for some reason
+-- honestly this whole library is just such a tangled mess of circular dependencies
+-- i have no idea how it works
 local root = {
 	id = "root",
 	gid = "root"

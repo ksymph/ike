@@ -1,12 +1,16 @@
 local Game = {
 	blueprints = {},
 	gid = {},
-	_rmv_queue = {},
-	_add_queue = {},
-	_upd_cache = {},
-	_draw_cache = {}
+	_cache = {
+		update = {},
+		draw = {}
+	},
+	_queue = {
+		remove = {}
+	}
 }
 
+local callbacks = {}
 -- recursively loops get_gid through parents
 -- parents need _get_gid method
 -- returns a gid in format "parent.child.grandchild"
@@ -22,7 +26,7 @@ end
 -- gives access to all tables when used as __index
 -- priority is the order in the inital array, checks first then second etc
 -- todo: right now, only the highest-level draw/update method is called
--- draw/update methods should be collected here then cached in Game to fix that
+-- draw/update methods should be collected here then cached to fix that
 local function merge_blueprints(blueprints)
 	local previous = nil
 	for i = #blueprints, 1, -1 do
@@ -42,21 +46,133 @@ local function merge_blueprints(blueprints)
 	return previous
 end
 
--- usage: obj:ins(child) or obj:ins(id, child)
 -- note: child can have 'extends' field
 -- this can be a string, or an array of strings of registered blueprints
--- todo: batching. children should be added to a subtable in Game
--- then added all at once at the start/end of a frame
-local function add_child(parent, a, b)
+local function add_object(object)
+	if not object.id then
+		object.id = #object.parent.children + 1
+		object.gid = get_gid(object)
+	end
 
-	-- properly assign child and id based on types
+	if object.init then object:init() end
+
+	object.parent.children[object.id] = object
+
+end
+
+-- recursively iterates through a table and its .children to create
+-- a 1d array, ordered by the provided key's value
+-- order is relative to parent
+-- to_push_pop is whether to put in "push" and "pop" for draw calls
+-- todo: check object parameters to eliminate unnecessary pushes/pops
+-- if x/y/rot/scale are the same then don't push pop
+local function flatten(root, key)
+	local list = {}
+
+	local prev = {
+		x = 0,
+		y = 0,
+		rot = 0,
+		scale = 0
+	}
+
+	local function drill(base)
+		if base[key] then table.insert(list, base.gid) end
+		local children = {}
+		if base.children then
+			for _,obj in pairs(base.children) do
+				table.insert(children, obj)
+			end
+		end
+
+		if #children > 0 then
+			table.sort(children, function(a,b)
+				return a.priority[key] < b.priority[key]
+			end)
+			for _,obj in ipairs(children) do
+				drill(obj, key)
+			end
+		end
+	end
+	local function drill_draw(base)
+		local to_push_pop = false
+		if (prev.x ~= base.x) or
+			(prev.y ~= base.y) or
+			(prev.rot ~= base.rot) or
+			(prev.scale ~= base.scale) then
+				prev.x = base.x
+				prev.y = base.y
+				prev.rot = base.rot
+				prev.scale = base.scale
+				to_push_pop = true
+		end
+		if to_push_pop then table.insert(list, "push") end
+		if base[key] or to_push_pop then table.insert(list, base.gid) end
+		local children = {}
+		if base.children then
+			for _,obj in pairs(base.children) do
+				table.insert(children, obj)
+			end
+		end
+
+		if #children > 0 then
+			table.sort(children, function(a,b)
+				return a.priority[key] < b.priority[key]
+			end)
+			for _,obj in ipairs(children) do
+				drill_draw(obj, key)
+			end
+		end
+		if to_push_pop then table.insert(list, "pop") end
+	end
+
+
+	if key == "draw" then drill_draw(root)
+	else drill(root) end
+	return list
+end
+
+-- self explanatory, really
+function Game.rebuild_cache()
+	for callback_name,_ in pairs(callbacks) do
+		Game._cache[callback_name] = flatten(Game.root, callback_name)
+	end
+end
+
+-- the actual object removal function
+local function remove_object(self)
+	for _,child in pairs(self.children) do
+		remove_object(child)
+	end
+	Game.gid[self.gid] = nil
+	self.parent.children[self.id] = nil
+end
+
+-- adds objects to the _rmv_queue
+-- to be removed between frames
+local function to_remove(self)
+	table.insert(Game._queue.remove, self)
+end
+local function to_remove_child(self, id)
+	if child_id == "*" then
+		for _,child in pairs(self.children) do
+			table.insert(Game._queue.remove, child)
+		end
+	else
+		table.insert(Game._queue.remove, self.children[id])
+	end
+end
+
+-- :to_add([id], obj)
+local function to_add(parent, a, b)
+	-- infer child and id based on types
 	local child, id
-	if type(a) == "string" then
+	if type(a) == "string" or type(a) == "number" then
 		id = a or #parent.children + 1
 		child = b or {}
 	else
 		child = a or {}
-		id = #parent.children + 1
+		id = nil
 	end
 
 	-- assemble a merged blueprint from child's extend field
@@ -73,99 +189,30 @@ local function add_child(parent, a, b)
 
 	-- assign child's properties and whatnot
 	-- note: the order here is important
-	child.id = id
 	child.parent = parent
+	if id then
+		child.id = id
+		child.gid = get_gid(child)
+	end
+	if not child.children then child.children = {} end
+	if not child.priority then
+		child.priority = {
+			draw = 1,
+			update = 1
+		}
+	end
 	setmetatable(child, {__index = blueprint_merged})
 
 
-
-
-	child.gid = get_gid(child)
-
-	-- init child, add grandchildren
-	-- todo: fix adding grandchildren
-	if child.init then child:init() end
-	local grandchildren = {}
+	-- check for grandchildren
 	for gc_id,grandchild in pairs(child.children) do
-		grandchildren[gc_id] = grandchild
-	end
-	child.children = {}
-	for gc_id,grandchild in pairs(grandchildren) do
-		--add_child(child, grandchild)
-		-- what the fuck is going on here
+		to_add(child, gc_id, grandchild)
 	end
 
-	parent.children[child.id] = child
+
+	table.insert(Game._queue.add, child)
 	return child
 end
-
--- recursively iterates through a table and its .children to create
--- a 1d array, ordered by the provided key's value
--- order is relative to parent
--- to_push_pop is whether to put in "push" and "pop" for draw calls
--- todo: check object parameters to eliminate unnecessary pushes/pops
-local function flatten(root, key, to_push_pop)
-	local flat_obj = _cumulative or {}
-	local list = {}
-	local function drill(base, key)
-		if to_push_pop then table.insert(list, "push") end
-		table.insert(list, base.gid)
-		local children = {}
-		if base.children then
-			for _,obj in pairs(base.children) do
-				table.insert(children, obj)
-			end
-		end
-
-		if #children > 0 then
-			table.sort(children, function(a,b)
-				return a[key] < b[key]
-			end)
-			for _,obj in ipairs(children) do
-				drill(obj, key)
-			end
-		end
-		if to_push_pop then table.insert(list, "pop") end
-
-	end
-
-	drill(root, key)
-	return list
-end
-
--- self explanatory, really
-function Game.rebuild_cache()
-	Game._draw_cache = flatten(Game.root, "draw_priority", true)
-	Game._upd_cache = flatten(Game.root, "update_priority")
-end
-
--- the actual object removal function
--- should only be called between frames
-local function remove_object(self)
-	for _,child in pairs(self.children) do
-		remove_object(child)
-	end
-	Game.gid[self.gid] = nil
-	self.parent.children[self.id] = nil
-	self = nil
-end
-
--- todo: clean this stuff up
--- adds objects to the _rmv_queue
--- to be removed between frames
-local function to_remove(self)
-	table.insert(Game._rmv_queue, self)
-end
-local function to_remove_child(self, id)
-	if child_id == "*" then
-		for _,child in pairs(self.children) do
-			table.insert(Game._rmv_queue, child)
-		end
-	else
-		table.insert(Game._rmv_queue, self.children[id])
-	end
-end
-
 -- base 'object' metatable
 -- inherited by everything
 Game.blueprints.default = {
@@ -173,19 +220,17 @@ Game.blueprints.default = {
 	y = 0,
 	rot = 0,
 	scale = 1,
-	children = {},
-	ins = add_child,
+	ins = to_add,
 	rmv = to_remove,
 	rmv_child = to_remove_child,
-	draw_priority = 1,
-	update_priority = 1,
 	_get_gid = get_gid
 }
 
 
 -- irrelevant in its current state, but
 -- todo: inheritance for blueprints
--- remember to use merge_blueprints
+-- so a blueprint can have an 'extends' field like objects
+-- remember to use merge_blueprints for multiple inheritance
 --[[
 setmetatable(Game.blueprints, {
 	__newindex = function(blueprints, id, blueprint)
@@ -198,62 +243,78 @@ setmetatable(Game.blueprints, {
 
 
 
--- todo: fix this fucking mess
 -- todo: add other love callbacks
-do
-	function love.draw()
-		--local offset_x, offset_y = 0,0
-		for _,id in ipairs(Game._draw_cache) do
-			--break
-			if id == "push" then
-				love.graphics.push()
-				--print("pushing")
-			elseif id == "pop" then
-				love.graphics.pop()
-				--print("popping")
+-- keypressed, etc
+callbacks = {
+	update = function(dt)
+		-- call object updates
+		for _,id in pairs(Game._cache.update) do
+			local obj = Game.gid[id]
+			if obj.update then obj:update(dt) end
+		end
+
+		local to_rebuild = false
+
+		-- clear objects in remove queue
+		for _, obj in ipairs(Game._queue.remove) do
+			local obj_gid = obj.gid
+			remove_object(obj)
+			Game.gid[obj_gid] = nil
+			to_rebuild = true
+		end
+		Game._queue.remove = {}
+
+		-- insert objects in add queue
+		for _, obj in ipairs(Game._queue.add) do
+			add_object(obj)
+			to_rebuild = true
+		end
+		Game._queue.add = {}
+
+		if to_rebuild then Game.rebuild_cache() end
+	end,
+
+	draw = function()
+		for _,id in ipairs(Game._cache.draw) do
+			if id == "push" then love.graphics.push()
+			elseif id == "pop" then love.graphics.pop()
 			else
 				local obj = Game.gid[id]
-				--print("translating to",obj.x,obj.y)
+				-- todo: don't translate/scale/etc if not necessary
 				love.graphics.translate(obj.x, obj.y)
 				love.graphics.rotate(obj.rot)
 				love.graphics.scale(obj.scale)
-				--offset_x, offset_y = obj.x, obj.y
 				if obj.draw then
 					obj:draw()
 				end
 			end
 		end
-		--]]
 	end
+}
 
-	function love.update(dt)
-		-- call object updates
-		for _,id in pairs(Game._upd_cache) do
-			local obj = Game.gid[id]
-			if obj.update then obj:update(dt) end
-		end
 
-		-- clear objects in remove queue
-		for _, obj in ipairs(Game._rmv_queue) do
-			local obj_gid = obj.gid
-			remove_object(obj)
-			Game.gid[obj_gid] = nil
-		end
 
-		-- insert objects in add queue
 
-		Game.rebuild_cache()
-	end
+
+Game._queue.add = {}
+
+
+for k,v in pairs(callbacks) do
+	love[k] = v
 end
+
+
+
 
 -- idk why but this needs to be a local variable, then metatable set, then added to Game
 -- can't just do Game.root = {id blah blah for some reason
--- honestly this whole library is just such a tangled mess of circular dependencies
--- i have no idea how it works
 local root = {
 	id = "root",
-	gid = "root"
+	gid = "root",
+	children = {},
+	priority = {}
 }
 setmetatable(root, { __index = Game.blueprints.default })
 Game.root = root
+Game.gid.root = root
 return Game

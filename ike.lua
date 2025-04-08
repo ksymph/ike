@@ -69,6 +69,7 @@ local function flatten(root, key)
 	}
 
 	local function drill(base)
+		if base._pause[key] then return end
 		if base[key] then table.insert(list, base.gid) end
 		local children = {}
 		if base.children then
@@ -87,6 +88,7 @@ local function flatten(root, key)
 		end
 	end
 	local function drill_draw(base)
+		if base._pause[key] then return end
 		local to_push_pop = false
 		if (prev.x ~= base.x) or
 			(prev.y ~= base.y) or
@@ -171,19 +173,20 @@ local function add_object(object)
 end
 
 local function pause_object(pause_recipe)
+	print("AAAAAA")
 	local obj = Game.gid[pause_recipe.target_id]
 	local target_parameter_list = {}
-	if target_parameter == "*" then
-		for k,v in pairs(obj.pause) do
+	if pause_recipe.target_parameter == "*" then
+		for k,v in pairs(obj._pause) do
 			target_parameter_list[k] = v
 		end
 	else
-		target_parameter_list[pause_recipe.target_parameter] = obj.pause[pause_recipe.target_parameter]
+		target_parameter_list[pause_recipe.target_parameter] = obj._pause[pause_recipe.target_parameter]
 	end
 
 	for k,v in pairs(target_parameter_list) do
-		obj.pause[k] = type(pause_recipe.target_state) == "boolean" and pause_recipe.target_state
-			or not obj.pause[k]
+		obj._pause[k] = type(pause_recipe.target_state) == "boolean" and pause_recipe.target_state
+			or not obj._pause[k]
 	end
 end
 
@@ -231,15 +234,13 @@ local function to_add(parent, a, b)
 			update = 1
 		}
 	end
-	--[[
-	if not child.pause then
+
+	if not child._pause then
 		local pause_table = {}
 		for k,_ in pairs(callbacks) do pause_table[k] = false end
-		child.pause = setmetatable(pause_table, {
-			__call = to_pause
-		})
+		child._pause = pause_table
 	end
-	--]]
+
 
 
 	setmetatable(child, {__index = blueprint_merged})
@@ -264,28 +265,34 @@ end
 setmetatable(Game.blueprints, {
 	__newindex = function(t, blueprint_name, blueprint)
 		local new_blueprint = {}
+
+		if blueprint.extends then
+			local blueprints = {}
+			for _, blueprint_id in ipairs(blueprint.extends) do
+				table.insert(blueprints, Game.blueprints[blueprint_id])
+			end
+			local merged = merge_blueprints(blueprints)
+			setmetatable(new_blueprint, { __index = merged })
+		end
+
 		for k,v in pairs(blueprint) do
-			if k == "extends" then
-				local blueprints = {}
-				for _,blueprint_id in ipairs(v) do
-					table.insert(blueprints, Game.blueprints[blueprint_id])
-				end
-				local blueprint_merged = merge_blueprints(blueprints)
-			elseif type(v) == "table" then
-				local function drill(base)
-					local assembled_table = {}
-					for key,val in pairs(base) do
-						if type(val) == "table" then
-							assembled_table[key] = drill(val)
-						else
-							assembled_table[key] = val
+			if k ~= "extends" then
+				if type(v) == "table" then
+					local function drill(base)
+						local assembled_table = {}
+						for key,val in pairs(base) do
+							if type(val) == "table" then
+								assembled_table[key] = drill(val)
+							else
+								assembled_table[key] = val
+							end
 						end
+						return assembled_table
 					end
-					return assembled_table
+					new_blueprint[k] = drill(v)
+				else
+					new_blueprint[k] = v
 				end
-				new_blueprint[k] = drill(v)
-			else
-				new_blueprint[k] = v
 			end
 		end
 		rawset(t, blueprint_name, new_blueprint)
@@ -302,7 +309,8 @@ Game.blueprints.default = {
 	ins = to_add,
 	rmv = to_remove,
 	rmv_child = to_remove_child,
-	msg = send_message
+	msg = send_message,
+	pause = to_pause
 }
 
 
@@ -316,6 +324,7 @@ callbacks = {
 
 		-- pause objects
 		for _,pause_recipe in ipairs(Game._queue.pause) do
+			print("pausing " .. pause_recipe.target_id)
 			pause_object(pause_recipe)
 			to_rebuild = true
 		end
@@ -390,7 +399,8 @@ local root = {
 	id = "root",
 	gid = "root",
 	children = {},
-	priority = {}
+	priority = {},
+	_pause = {}
 }
 setmetatable(root, { __index = Game.blueprints.default })
 Game.root = root

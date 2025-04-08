@@ -6,7 +6,10 @@ local Game = {
 		draw = {}
 	},
 	_queue = {
-		remove = {}
+		remove = {},
+		add = {},
+		message = {},
+		pause = {}
 	}
 }
 
@@ -16,7 +19,9 @@ local callbacks = {}
 -- returns a gid in format "parent.child.grandchild"
 local function get_gid(self)
 	local gid = self.id
-	if self.parent then gid = self.parent:_get_gid() .. "." .. gid end
+	if self.parent then
+		gid = self.parent.gid .. "." .. gid
+	end
 	Game.gid[gid] = self
 	return gid
 end
@@ -46,19 +51,6 @@ local function merge_blueprints(blueprints)
 	return previous
 end
 
--- note: child can have 'extends' field
--- this can be a string, or an array of strings of registered blueprints
-local function add_object(object)
-	if not object.id then
-		object.id = #object.parent.children + 1
-		object.gid = get_gid(object)
-	end
-
-	if object.init then object:init() end
-
-	object.parent.children[object.id] = object
-
-end
 
 -- recursively iterates through a table and its .children to create
 -- a 1d array, ordered by the provided key's value
@@ -136,6 +128,7 @@ end
 function Game.rebuild_cache()
 	for callback_name,_ in pairs(callbacks) do
 		Game._cache[callback_name] = flatten(Game.root, callback_name)
+		--for k,v in pairs(Game._cache[callback_name]) do print(k,v) end
 	end
 end
 
@@ -163,6 +156,46 @@ local function to_remove_child(self, id)
 	end
 end
 
+-- note: child can have 'extends' field
+-- this can be a string, or an array of strings of registered blueprints
+local function add_object(object)
+	if not object.id then
+		object.id = #object.parent.children + 1
+		object.gid = get_gid(object)
+	end
+
+	if object.init then object:init() end
+
+	object.parent.children[object.id] = object
+
+end
+
+local function pause_object(pause_recipe)
+	local obj = Game.gid[pause_recipe.target_id]
+	local target_parameter_list = {}
+	if target_parameter == "*" then
+		for k,v in pairs(obj.pause) do
+			target_parameter_list[k] = v
+		end
+	else
+		target_parameter_list[pause_recipe.target_parameter] = obj.pause[pause_recipe.target_parameter]
+	end
+
+	for k,v in pairs(target_parameter_list) do
+		obj.pause[k] = type(pause_recipe.target_state) == "boolean" and pause_recipe.target_state
+			or not obj.pause[k]
+	end
+end
+
+
+local function to_pause(self, target_parameter, target_state)
+	table.insert(Game._queue.pause, {
+		target_id = self.gid,
+		target_parameter = target_parameter or "*",
+		target_state = target_state
+	})
+end
+
 -- :to_add([id], obj)
 local function to_add(parent, a, b)
 	-- infer child and id based on types
@@ -178,10 +211,7 @@ local function to_add(parent, a, b)
 	-- assemble a merged blueprint from child's extend field
 	-- todo: caching merged blueprints? could use an id system like gid
 	local blueprints = {}
-	local child_blueprints = type(child.extends) == "string" and {child.extends}
-		or type(child.extends) == "table" and child.extends
-		or {}
-	for _,blueprint_id in ipairs(child_blueprints) do
+	for _,blueprint_id in ipairs(child.extends or {}) do
 		table.insert(blueprints, Game.blueprints[blueprint_id])
 	end
 	table.insert(blueprints, Game.blueprints.default)
@@ -201,6 +231,17 @@ local function to_add(parent, a, b)
 			update = 1
 		}
 	end
+	--[[
+	if not child.pause then
+		local pause_table = {}
+		for k,_ in pairs(callbacks) do pause_table[k] = false end
+		child.pause = setmetatable(pause_table, {
+			__call = to_pause
+		})
+	end
+	--]]
+
+
 	setmetatable(child, {__index = blueprint_merged})
 
 
@@ -213,6 +254,44 @@ local function to_add(parent, a, b)
 	table.insert(Game._queue.add, child)
 	return child
 end
+
+local function send_message(self, recipient, message)
+	local recipient_gid = type(recipient) == "table" and recipient.gid or recipient
+	table.insert(Game._queue.message, {sender = self.gid, recipient = recipient_gid, contents = message})
+end
+
+
+setmetatable(Game.blueprints, {
+	__newindex = function(t, blueprint_name, blueprint)
+		local new_blueprint = {}
+		for k,v in pairs(blueprint) do
+			if k == "extends" then
+				local blueprints = {}
+				for _,blueprint_id in ipairs(v) do
+					table.insert(blueprints, Game.blueprints[blueprint_id])
+				end
+				local blueprint_merged = merge_blueprints(blueprints)
+			elseif type(v) == "table" then
+				local function drill(base)
+					local assembled_table = {}
+					for key,val in pairs(base) do
+						if type(val) == "table" then
+							assembled_table[key] = drill(val)
+						else
+							assembled_table[key] = val
+						end
+					end
+					return assembled_table
+				end
+				new_blueprint[k] = drill(v)
+			else
+				new_blueprint[k] = v
+			end
+		end
+		rawset(t, blueprint_name, new_blueprint)
+	end
+})
+
 -- base 'object' metatable
 -- inherited by everything
 Game.blueprints.default = {
@@ -223,22 +302,8 @@ Game.blueprints.default = {
 	ins = to_add,
 	rmv = to_remove,
 	rmv_child = to_remove_child,
-	_get_gid = get_gid
+	msg = send_message
 }
-
-
--- irrelevant in its current state, but
--- todo: inheritance for blueprints
--- so a blueprint can have an 'extends' field like objects
--- remember to use merge_blueprints for multiple inheritance
---[[
-setmetatable(Game.blueprints, {
-	__newindex = function(blueprints, id, blueprint)
-		setmetatable(blueprint, {__index = Game.blueprints.default})
-		rawset(blueprints, id, blueprint)
-	end
-})
---]]
 
 
 
@@ -247,13 +312,20 @@ setmetatable(Game.blueprints, {
 -- keypressed, etc
 callbacks = {
 	update = function(dt)
+		local to_rebuild = false
+
+		-- pause objects
+		for _,pause_recipe in ipairs(Game._queue.pause) do
+			pause_object(pause_recipe)
+			to_rebuild = true
+		end
+		Game._queue.pause = {}
+
 		-- call object updates
 		for _,id in pairs(Game._cache.update) do
 			local obj = Game.gid[id]
 			if obj.update then obj:update(dt) end
 		end
-
-		local to_rebuild = false
 
 		-- clear objects in remove queue
 		for _, obj in ipairs(Game._queue.remove) do
@@ -270,6 +342,15 @@ callbacks = {
 			to_rebuild = true
 		end
 		Game._queue.add = {}
+
+		-- send messages
+		for _,message in ipairs(Game._queue.message) do
+			if Game.gid[message.recipient] and Game.gid[message.recipient].receive then
+				Game.gid[message.recipient]:receive(message.sender, message.contents)
+			end
+		end
+		Game._queue.message = {}
+
 
 		if to_rebuild then Game.rebuild_cache() end
 	end,
@@ -294,9 +375,6 @@ callbacks = {
 
 
 
-
-
-Game._queue.add = {}
 
 
 for k,v in pairs(callbacks) do

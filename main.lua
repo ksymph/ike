@@ -20,22 +20,23 @@ Game.blueprints.vbar = {
 		self.y = self.y > 512 and -320 or self.y + 0
 		if self.id == 5 and self.x > 952 then self:rmv() end
 		--print(self.gid)
-	end
+	end,
+	test = {foo = "bar"}
 }
 
 Root:ins {
 	rot = 0,
-	extends = "vbar"
+	extends = {"vbar"}
 }
 Root:ins {
 	rot = 0,
-	extends = "vbar",
+	extends = {"vbar"},
 	x = 1856,
 	update = function() end
 }
 Root:ins {
 	rot = 0,
-	extends = "vbar",
+	extends = {"vbar"},
 	x = 1856,
 	y = 824,
 	update = function() end
@@ -45,16 +46,15 @@ local vbar_container = Root:ins("vbar_container",
 	{
 		y = 32,
 		children = {
-			{extends = "vbar",light = 255, x = 255, y=100, children = {{extends = "vbar",light = 255, x = 5, y=5}}}
+			{extends = {"vbar"},light = 255, x = 255, y=100, children = {{extends = {"vbar"},light = 255, x = 5, y=5}}}
 		}
 	}
 )
 
 for i=1,8 do
-	vbar_container:ins({light = i/8, x = i*96, y=i*32, extends = "vbar"})
+	vbar_container:ins({light = i/8, x = i*96, y=i*32, extends = {"vbar"}})
 end
 
-love.graphics.setDefaultFilter('nearest', 'nearest')
 
 Root:ins {
 	draw = function()
